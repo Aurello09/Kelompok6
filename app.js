@@ -451,3 +451,277 @@ if (btnFetchAccel) {
     } catch (e) { console.error(e); } finally { btn.innerHTML = `<i class="ph ph-arrows-clockwise"></i> Fetch Latest`; }
   });
 }
+
+
+// ========== MODULE 3: GPS TRACKING ==========
+let gpsWatchId = null;
+let gpsInterval = null;
+let currentMarker = null;
+let historyPolyline = null;
+let accuracyCircle = null;
+ 
+// --- Init Leaflet Map ---
+function initMap() {
+  if (mapInitialized) return;
+  const mapEl = document.getElementById('map');
+  if (!mapEl || typeof L === 'undefined') return;
+ 
+  map = L.map('map').setView([-7.2575, 112.7521], 13); // Default: Surabaya
+ 
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+    maxZoom: 19
+  }).addTo(map);
+ 
+  mapInitialized = true;
+  console.log('[GPS] Map initialized');
+}
+ 
+// --- Update Marker & Circle di peta ---
+function updateMapMarker(lat, lng, accuracy) {
+  if (!map) return;
+ 
+  // Custom icon
+  const icon = L.divIcon({
+    className: '',
+    html: `<div style="
+      width:16px;height:16px;
+      background:var(--primary-color,#6366f1);
+      border:3px solid #fff;
+      border-radius:50%;
+      box-shadow:0 0 10px rgba(99,102,241,0.8);">
+    </div>`,
+    iconSize: [16, 16],
+    iconAnchor: [8, 8]
+  });
+ 
+  if (currentMarker) {
+    currentMarker.setLatLng([lat, lng]);
+  } else {
+    currentMarker = L.marker([lat, lng], { icon }).addTo(map)
+      .bindPopup(`<b>Device: ${getDeviceId()}</b><br>Lat: ${lat.toFixed(6)}<br>Lng: ${lng.toFixed(6)}`);
+  }
+ 
+  if (accuracyCircle) {
+    accuracyCircle.setLatLng([lat, lng]).setRadius(accuracy || 20);
+  } else {
+    accuracyCircle = L.circle([lat, lng], {
+      radius: accuracy || 20,
+      color: '#6366f1',
+      fillColor: '#6366f1',
+      fillOpacity: 0.1,
+      weight: 1
+    }).addTo(map);
+  }
+ 
+  map.setView([lat, lng], map.getZoom() < 15 ? 16 : map.getZoom());
+}
+ 
+// --- Kirim GPS ke Server ---
+async function sendGpsPoint(lat, lng, accuracy) {
+  const payload = {
+    device_id: getDeviceId(),
+    ts: getTs(),
+    lat: parseFloat(lat.toFixed(7)),
+    lng: parseFloat(lng.toFixed(7)),
+    accuracy_m: accuracy ? parseFloat(accuracy.toFixed(1)) : null
+  };
+ 
+  try {
+    const res = await apiFetch('/telemetry/gps', {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    });
+    if (res && res.ok) {
+      showToast(`📍 GPS terkirim (${lat.toFixed(5)}, ${lng.toFixed(5)})`, 'success');
+    }
+  } catch (e) {
+    console.error('[GPS] Send error:', e);
+  }
+}
+ 
+// --- Update UI Label GPS ---
+function updateGpsLabels(lat, lng, accuracy) {
+  const elLat = document.getElementById('lbl-lat');
+  const elLng = document.getElementById('lbl-lng');
+  const elAcc = document.getElementById('lbl-acc');
+  if (elLat) elLat.innerText = lat.toFixed(6);
+  if (elLng) elLng.innerText = lng.toFixed(6);
+  if (elAcc) elAcc.innerText = accuracy ? accuracy.toFixed(1) : '-';
+}
+ 
+// --- Set GPS Status UI ---
+function setGpsStatus(status) {
+  const el = document.getElementById('gps-status-text');
+  const indicator = el ? el.closest('.status-indicator') : null;
+  if (el) el.innerText = status;
+  if (indicator) {
+    indicator.classList.toggle('active', status !== 'Standby' && status !== 'Error');
+  }
+}
+ 
+// --- Tombol Mulai GPS ---
+const btnStartGps = document.getElementById('btn-start-gps');
+if (btnStartGps) {
+  btnStartGps.addEventListener('click', () => {
+    if (!navigator.geolocation) {
+      showToast('Browser tidak mendukung Geolocation!', 'error');
+      return;
+    }
+ 
+    // Inisialisasi map jika belum
+    if (!mapInitialized) initMap();
+ 
+    setGpsStatus('Mencari sinyal...');
+    document.getElementById('btn-start-gps').classList.add('hidden');
+    document.getElementById('btn-stop-gps').classList.remove('hidden');
+ 
+    // Ambil posisi pertama langsung
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        const { latitude: lat, longitude: lng, accuracy } = pos.coords;
+        updateGpsLabels(lat, lng, accuracy);
+        updateMapMarker(lat, lng, accuracy);
+        sendGpsPoint(lat, lng, accuracy);
+        setGpsStatus('Aktif (live)');
+      },
+      (err) => {
+        console.error('[GPS] Error:', err);
+        showToast(`GPS Error: ${err.message}`, 'error');
+        setGpsStatus('Error');
+      },
+      { enableHighAccuracy: true, timeout: 10000 }
+    );
+ 
+    // Kirim ke server setiap 10 detik
+    gpsInterval = setInterval(() => {
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          const { latitude: lat, longitude: lng, accuracy } = pos.coords;
+          updateGpsLabels(lat, lng, accuracy);
+          updateMapMarker(lat, lng, accuracy);
+          sendGpsPoint(lat, lng, accuracy);
+        },
+        (err) => {
+          console.warn('[GPS] Interval error:', err.message);
+          setGpsStatus('Sinyal lemah...');
+        },
+        { enableHighAccuracy: true, timeout: 8000 }
+      );
+    }, 10000); // setiap 10 detik
+  });
+}
+ 
+// --- Tombol Stop GPS ---
+const btnStopGps = document.getElementById('btn-stop-gps');
+if (btnStopGps) {
+  btnStopGps.addEventListener('click', () => {
+    if (gpsInterval) clearInterval(gpsInterval);
+    if (gpsWatchId) navigator.geolocation.clearWatch(gpsWatchId);
+    gpsInterval = null;
+    gpsWatchId = null;
+ 
+    setGpsStatus('Standby');
+    document.getElementById('btn-start-gps').classList.remove('hidden');
+    document.getElementById('btn-stop-gps').classList.add('hidden');
+    showToast('GPS tracking dihentikan', 'info');
+  });
+}
+ 
+// --- Tombol Ambil Latest (Marker) ---
+const btnFetchGpsLatest = document.getElementById('btn-fetch-gps-latest');
+if (btnFetchGpsLatest) {
+  btnFetchGpsLatest.addEventListener('click', async () => {
+    const btn = btnFetchGpsLatest;
+    btn.innerHTML = `<i class="ph ph-spinner-gap"></i> Mengambil...`;
+    btn.disabled = true;
+ 
+    try {
+      const res = await apiFetch(`/telemetry/gps/latest?device_id=${getDeviceId()}`);
+      if (res && res.ok && res.data) {
+        const { lat, lng, accuracy_m, ts } = res.data;
+ 
+        if (!mapInitialized) initMap();
+        updateMapMarker(lat, lng, accuracy_m);
+        updateGpsLabels(lat, lng, accuracy_m);
+ 
+        if (currentMarker) {
+          currentMarker.setPopupContent(
+            `<b>Latest dari Server</b><br>Lat: ${lat.toFixed(6)}<br>Lng: ${lng.toFixed(6)}<br>Waktu: ${new Date(ts).toLocaleTimeString()}`
+          ).openPopup();
+        }
+        showToast(`Marker diperbarui dari server`, 'success');
+      }
+    } catch (e) {
+      console.error('[GPS Latest]', e);
+    } finally {
+      btn.innerHTML = `Ambil Latest (Marker)`;
+      btn.disabled = false;
+    }
+  });
+}
+ 
+// --- Tombol Ambil History (Polyline) ---
+const btnFetchGpsHistory = document.getElementById('btn-fetch-gps-history');
+if (btnFetchGpsHistory) {
+  btnFetchGpsHistory.addEventListener('click', async () => {
+    const btn = btnFetchGpsHistory;
+    btn.innerHTML = `<i class="ph ph-spinner-gap"></i> Mengambil...`;
+    btn.disabled = true;
+ 
+    try {
+      const res = await apiFetch(`/telemetry/gps/history?device_id=${getDeviceId()}&limit=200`);
+      if (res && res.ok && res.data && res.data.items) {
+        const items = res.data.items;
+ 
+        if (items.length === 0) {
+          showToast('Belum ada history GPS di server', 'info');
+          return;
+        }
+ 
+        if (!mapInitialized) initMap();
+ 
+        // Hapus polyline lama kalau ada
+        if (historyPolyline) {
+          map.removeLayer(historyPolyline);
+          historyPolyline = null;
+        }
+ 
+        // Buat polyline dari items
+        const latlngs = items.map(p => [p.lat, p.lng]);
+        historyPolyline = L.polyline(latlngs, {
+          color: '#6366f1',
+          weight: 3,
+          opacity: 0.8,
+          dashArray: '6, 4'
+        }).addTo(map);
+ 
+        // Fit map ke polyline
+        map.fitBounds(historyPolyline.getBounds(), { padding: [30, 30] });
+ 
+        // Tambah marker start & end
+        if (latlngs.length > 1) {
+          const startIcon = L.divIcon({
+            className: '',
+            html: `<div style="background:#22c55e;width:12px;height:12px;border-radius:50%;border:2px solid #fff;"></div>`,
+            iconSize: [12, 12], iconAnchor: [6, 6]
+          });
+          const endIcon = L.divIcon({
+            className: '',
+            html: `<div style="background:#ef4444;width:12px;height:12px;border-radius:50%;border:2px solid #fff;"></div>`,
+            iconSize: [12, 12], iconAnchor: [6, 6]
+          });
+          L.marker(latlngs[0], { icon: startIcon }).addTo(map).bindPopup('🟢 Start');
+          L.marker(latlngs[latlngs.length - 1], { icon: endIcon }).addTo(map).bindPopup('🔴 End (Latest)');
+        }
+ 
+        showToast(`History dimuat: ${items.length} titik`, 'success');
+      }
+    } catch (e) {
+      console.error('[GPS History]', e);
+    } finally {
+      btn.innerHTML = `Ambil History (Polyline)`;
+      btn.disabled = false;
+    }
+  });
+}
