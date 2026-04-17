@@ -451,3 +451,135 @@ if (btnFetchAccel) {
     } catch (e) { console.error(e); } finally { btn.innerHTML = `<i class="ph ph-arrows-clockwise"></i> Fetch Latest`; }
   });
 }
+
+// ========== MODULE 3: GPS TRACKING ==========
+let map;
+let mapInitialized = false;
+let globalMarker, polylineLayer;
+let gpsWatchId = null;
+let lastGpsPoint = null;
+
+function initMap() {
+  if (typeof L === 'undefined') return;
+  map = L.map('map').setView([-7.2504, 112.7688], 13); // Default Surabaya
+  L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
+    attribution: '&copy; OpenStreetMap &copy; CARTO'
+  }).addTo(map);
+
+  globalMarker = L.marker([-7.2504, 112.7688]).addTo(map);
+  polylineLayer = L.polyline([], { color: '#6366f1', weight: 4 }).addTo(map);
+  mapInitialized = true;
+}
+
+// Start tracking via Geolocation
+const btnStartGps = document.getElementById('btn-start-gps');
+if (btnStartGps) {
+  btnStartGps.addEventListener('click', () => {
+    if (!navigator.geolocation) return showToast('GPS not supported on device', 'error');
+
+    document.getElementById('btn-start-gps').classList.add('hidden');
+    document.getElementById('btn-stop-gps').classList.remove('hidden');
+
+    const sts = document.getElementById('gps-status-text');
+    sts.innerText = "Tracking Active";
+    sts.parentElement.classList.add('active');
+
+    gpsWatchId = navigator.geolocation.watchPosition(
+      position => {
+        const { latitude, longitude, accuracy } = position.coords;
+        document.getElementById('lbl-lat').innerText = latitude.toFixed(6);
+        document.getElementById('lbl-lng').innerText = longitude.toFixed(6);
+        document.getElementById('lbl-acc').innerText = Math.round(accuracy);
+
+        // Update local marker immediately to feel fast
+        if (globalMarker) {
+          globalMarker.setLatLng([latitude, longitude]);
+          map.setView([latitude, longitude]); // pan to current
+        }
+
+        lastGpsPoint = { lat: latitude, lng: longitude, accuracy };
+
+        // Post to Backend
+        postGpsData(latitude, longitude, accuracy);
+      },
+      err => showToast(`GPS Error: ${err.message}`, 'error'),
+      { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+    );
+  });
+}
+
+async function postGpsData(lat, lng, accuracy) {
+  const payload = {
+    device_id: getDeviceId(),
+    ts: getTs(),
+    lat: parseFloat(lat),
+    lng: parseFloat(lng),
+    accuracy_m: parseFloat(accuracy)
+  };
+  try {
+    const res = await apiFetch('/telemetry/gps', {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    });
+    if (res && res.ok) console.log('✅ GPS logged to GAS');
+  } catch (e) { console.error(e); }
+}
+
+const btnStopGps = document.getElementById('btn-stop-gps');
+if (btnStopGps) {
+  btnStopGps.addEventListener('click', () => {
+    if (gpsWatchId) navigator.geolocation.clearWatch(gpsWatchId);
+    document.getElementById('btn-start-gps').classList.remove('hidden');
+    document.getElementById('btn-stop-gps').classList.add('hidden');
+
+    const sts = document.getElementById('gps-status-text');
+    sts.innerText = "Standby";
+    sts.parentElement.classList.remove('active');
+  });
+}
+
+// Fetch Latest Mapper
+const btnFetchGpsLatest = document.getElementById('btn-fetch-gps-latest');
+if (btnFetchGpsLatest) {
+  btnFetchGpsLatest.addEventListener('click', async () => {
+    const btn = document.getElementById('btn-fetch-gps-latest');
+    btn.innerText = 'Working...';
+    try {
+      const res = await apiFetch(`/telemetry/gps/latest?device_id=${getDeviceId()}`);
+      if (res && res.ok && res.data) {
+        let { lat, lng } = res.data;
+        lat = parseFloat(lat);
+        lng = parseFloat(lng);
+        if (globalMarker && !isNaN(lat) && !isNaN(lng)) {
+          globalMarker.setLatLng([lat, lng]);
+          globalMarker.bindPopup(`Last seen: ${new Date(res.data.ts).toLocaleTimeString()}`).openPopup();
+          map.flyTo([lat, lng], 15);
+        }
+        showToast('Posisi terbaru ditarik', 'success');
+      }
+    } catch (e) { console.error(e); } finally { btn.innerText = 'Ambil Latest (Marker)'; }
+  });
+}
+
+// Fetch History Polyline
+const btnFetchGpsHistory = document.getElementById('btn-fetch-gps-history');
+if (btnFetchGpsHistory) {
+  btnFetchGpsHistory.addEventListener('click', async () => {
+    const btn = document.getElementById('btn-fetch-gps-history');
+    btn.innerText = 'Working...';
+    try {
+      const res = await apiFetch(`/telemetry/gps/history?device_id=${getDeviceId()}&limit=50`);
+      if (res && res.ok && res.data && res.data.items) {
+        const g_points = res.data.items
+          .map(i => [parseFloat(i.lat), parseFloat(i.lng)])
+          .filter(p => !isNaN(p[0]) && !isNaN(p[1])); // Pastikan angka valid
+
+        if (polylineLayer && g_points.length > 0) {
+          polylineLayer.setLatLngs(g_points);
+          map.fitBounds(polylineLayer.getBounds(), { padding: [20, 20] });
+        }
+        showToast(`Riwayat lokasi berhasil digambar (${g_points.length} titik)`, 'success');
+      }
+    } catch (e) { console.error(e); } finally { btn.innerText = 'Ambil History (Polyline)'; }
+  });
+}
